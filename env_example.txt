@@ -1,0 +1,8 @@
+OPENAI_API_KEY=your_openai_api_key_here
+MODEL_NAME=gpt-4o-mini
+MAX_RETRIES=3
+BATCH_SIZE=10
+TIMEOUT_SECONDS=30
+
+
+
