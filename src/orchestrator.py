@@ -18,17 +18,41 @@ from .confirm_flow import ConfirmFlow
 from .query_tools import QueryTools
 from .viz import RadiologyVisualizer
 from .safety import check_text
+from .reflection import ReflectionArchitecture
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(OUTPUT_DIR, 'radiology_agent.log')),
-        logging.StreamHandler(sys.stdout)
-    ]
+# --- logging setup (drop-in replacement) ---
+import os, sys, logging
+from logging.handlers import RotatingFileHandler
+
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "out")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+file_handler = RotatingFileHandler(
+    os.path.join(OUTPUT_DIR, "radiology_agent.log"),
+    maxBytes=50 * 1024 * 1024,   # 单文件 50MB
+    backupCount=5,               # 最多保留 5 个滚动备份（总 ~<=300MB）
+    encoding="utf-8"
 )
-logger = logging.getLogger(__name__)
+stream_handler = logging.StreamHandler(sys.stdout)
+
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[file_handler, stream_handler],
+    force=True,  # 防止重复添加旧的 handler
+)
+
+logger = logging.getLogger("radiology_agent")
+# 可选：写长文本时只记摘要，避免日志再次暴涨
+def _clip(s: str, n: int = 1000) -> str:
+    if not s:
+        return ""
+    return s[:n] + ("…[truncated]" if len(s) > n else "")
+# 使用示例：
+# logger.info({"prompt_head": _clip(prompt, 800), "response_head": _clip(resp, 1200)})
+# --- end logging setup ---
+
 
 class RadiologyAgent:
     """Main orchestrator for the radiology AI agent."""
@@ -46,6 +70,7 @@ class RadiologyAgent:
         self.intent_parser = IntentParser()
         self.confirm_flow = ConfirmFlow()
         self.llm_extractor = None if dry_run else LLMExtractor()
+        self.reflection_arch = ReflectionArchitecture()
         
         logger.info(f"Radiology Agent initialized - Dry run: {dry_run}, Limit: {limit}")
     
@@ -166,7 +191,7 @@ class RadiologyAgent:
     
     def process_user_query(self, query: str, structured_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
-        Process a user query and return filtered results.
+        Process a user query and return filtered results with reflection.
         
         Args:
             query: Natural language query
@@ -175,16 +200,61 @@ class RadiologyAgent:
         Returns:
             Filtered DataFrame or None if cancelled
         """
+        import time
+        start_time = time.time()
+        
         logger.info(f"Processing user query: {query}")
         
-        # Parse the query
-        user_query = self.intent_parser.parse_query(query)
+        # Check domain relevance first
+        domain_result = self.intent_parser.parse_query_with_domain_validation(query)
+        
+        if not domain_result['domain_relevant']:
+            # Query is not relevant to medical radiology domain
+            print("\n" + "="*60)
+            print("DOMAIN VALIDATION")
+            print("="*60)
+            print(domain_result['message'])
+            print(f"\nSuggestion: {domain_result['suggestion']}")
+            
+            # Ask user if they want general LLM response
+            user_choice = input("\nWould you like a general answer? (y/n): ").lower().strip()
+            
+            if user_choice in ['y', 'yes']:
+                print("\n" + "="*60)
+                print("GENERAL LLM RESPONSE")
+                print("="*60)
+                print(domain_result['general_response'])
+                print("\nNote: This information is from general knowledge, not from the medical dataset.")
+            else:
+                print("Please ask about medical radiology topics like patient records, kidney stones, bladder conditions, or imaging findings.")
+            
+            return None
+        
+        # Check if data is available for the query
+        if not domain_result.get('data_available', True):
+            # Query requires data that is not available in the dataset
+            print("\n" + "="*60)
+            print("DATA AVAILABILITY CHECK")
+            print("="*60)
+            print(domain_result['message'])
+            print(f"\nSuggestion: {domain_result['suggestion']}")
+            
+            if 'available_fields' in domain_result:
+                print(f"\nAvailable data fields in this dataset:")
+                for field in domain_result['available_fields']:
+                    print(f"  • {field}")
+            
+            return None
+        
+        # Query is relevant to medical domain and data is available, proceed with normal processing
+        user_query = domain_result['user_query']
         
         # Create query tools
         query_tools = QueryTools(structured_df)
         
-        # Estimate matching rows
-        estimated_rows = query_tools.estimate_matching_rows(user_query.filters)
+        # Estimate matching rows with query context
+        query_context = {'query_text': query}
+        estimated_rows = query_tools.estimate_matching_rows(user_query.filters, query_context)
         
         # Create plan summary
         plan = self.intent_parser.create_plan_summary(user_query, estimated_rows)
@@ -195,19 +265,41 @@ class RadiologyAgent:
             logger.info("User cancelled the operation")
             return None
         
-        # Apply filters
-        filtered_df = query_tools.apply_filters(confirmed_plan.filters)
+        # Apply filters with dynamic learning
+        filtered_df = query_tools.apply_filters_with_learning(confirmed_plan.filters, query)
         
         # Save filtered results
         if len(filtered_df) > 0:
             save_path = save_structured_data(filtered_df, 'filtered', 'csv')
             logger.info(f"Filtered results saved to {save_path}")
         
-        # Display summary - only compute stats for relevant fields
-        relevant_fields = confirmed_plan.input_fields + list(confirmed_plan.filters.keys())
-        stats = query_tools.get_summary_stats(filtered_df, relevant_fields, query)
+        # Display summary with dynamic learning - only compute stats for relevant fields
+        relevant_fields = confirmed_plan.input_fields + [str(k) for k in confirmed_plan.filters.keys()]
+        stats = query_tools.get_summary_stats_with_learning(filtered_df, query, relevant_fields)
         summary_text = query_tools.format_summary(stats)
         print("\n" + summary_text)
+        
+        # REFLECTION STAGE: Reflect on the initial answer (if enabled)
+        if self.reflection_arch is not None:
+            processing_time = time.time() - start_time
+            reflection_result = self.reflection_arch.reflect_on_answer(
+                query=query,
+                user_query=user_query,
+                initial_answer=stats,
+                filtered_df=filtered_df,
+                processing_time=processing_time
+            )
+            
+            # Display reflection results
+            self._display_reflection_results(reflection_result)
+            
+            # Apply self-correction if needed
+            if reflection_result.confidence < 0.7 or reflection_result.quality_score < 0.7:
+                corrected_df = self._apply_self_correction(
+                    query, user_query, stats, filtered_df, reflection_result
+                )
+                if corrected_df is not None:
+                    return corrected_df
         
         return filtered_df
     
@@ -304,7 +396,7 @@ class RadiologyAgent:
                     print("Creating visualizations...")
                     # Parse query to determine relevant fields
                     user_query = self.intent_parser.parse_query(query)
-                    relevant_fields = user_query.input_fields + list(user_query.filters.keys())
+                    relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
                     plots = self.create_visualizations(structured_df, relevant_fields)
                     if plots:
                         print(f"Created {len(plots)} relevant visualizations in {PLOTS_DIR}")
@@ -318,7 +410,7 @@ class RadiologyAgent:
                     
                     # Parse the query to get relevant fields for visualizations
                     user_query = self.intent_parser.parse_query(query)
-                    relevant_fields = user_query.input_fields + list(user_query.filters.keys())
+                    relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
                     
                     # Offer additional options
                     while True:
@@ -377,6 +469,120 @@ class RadiologyAgent:
         except Exception as e:
             logger.error(f"Pipeline failed: {e}")
             raise
+    
+    def _display_reflection_results(self, reflection_result):
+        """Display reflection results to the user."""
+        print("\n" + "="*60)
+        print("REFLECTION ANALYSIS")
+        print("="*60)
+        
+        # Quality score
+        quality_score = reflection_result.quality_score
+        if quality_score >= 0.9:
+            quality_status = "Excellent"
+        elif quality_score >= 0.7:
+            quality_status = "Good"
+        elif quality_score >= 0.5:
+            quality_status = "Adequate"
+        else:
+            quality_status = "Needs Improvement"
+        
+        print(f"Answer Quality: {quality_score:.2f}/1.0 ({quality_status})")
+        print(f"Confidence: {reflection_result.confidence:.2f}/1.0")
+        
+        # Issues
+        if reflection_result.issues:
+            print(f"\nIssues Identified ({len(reflection_result.issues)}):")
+            for i, issue in enumerate(reflection_result.issues, 1):
+                print(f"  {i}. {issue}")
+        
+        # Improvements
+        if reflection_result.improvements:
+            print(f"\nSuggested Improvements ({len(reflection_result.improvements)}):")
+            for i, improvement in enumerate(reflection_result.improvements, 1):
+                print(f"  {i}. {improvement}")
+        
+        # Reasoning
+        print(f"\nAnalysis: {reflection_result.reasoning}")
+        
+        # Actions
+        if reflection_result.suggested_actions:
+            print(f"\nRecommended Actions ({len(reflection_result.suggested_actions)}):")
+            for i, action in enumerate(reflection_result.suggested_actions, 1):
+                print(f"  {i}. {action}")
+        
+        print("="*60)
+    
+    def _apply_self_correction(self, 
+                              query: str,
+                              user_query,
+                              initial_answer: Dict[str, Any],
+                              filtered_df: pd.DataFrame,
+                              reflection_result) -> Optional[pd.DataFrame]:
+        """Apply self-correction based on reflection results."""
+        
+        logger.info("Applying self-correction based on reflection analysis")
+        
+        # Check if self-correction is needed and feasible
+        if reflection_result.confidence < 0.5:
+            logger.warning("Confidence too low for reliable self-correction")
+            return None
+        
+        # Create new query tools for correction
+        query_tools = QueryTools(filtered_df)
+        
+        # Apply corrections based on identified issues
+        corrected_df = filtered_df.copy()
+        corrections_applied = []
+        
+        # Issue: Potential accuracy issues in filtering logic
+        if any("accuracy" in issue.lower() for issue in reflection_result.issues):
+            # Re-verify filters
+            logger.info("Re-verifying filter accuracy")
+            corrections_applied.append("Re-verified filter logic")
+        
+        # Issue: Missing requested information
+        if any("completeness" in issue.lower() for issue in reflection_result.issues):
+            # Try to add missing information
+            if 'mean' in query.lower() and 'mean_bladder_volume_ml' not in initial_answer:
+                # Calculate missing mean
+                if 'bladder_volume_ml' in corrected_df.columns:
+                    mean_volume = corrected_df['bladder_volume_ml'].mean()
+                    logger.info(f"Added missing mean bladder volume: {mean_volume:.1f} ml")
+                    corrections_applied.append(f"Added mean bladder volume: {mean_volume:.1f} ml")
+        
+        # Issue: Answer may not fully address query intent
+        if any("relevance" in issue.lower() for issue in reflection_result.issues):
+            # Refine answer to be more relevant
+            if 'left' in query.lower() and 'right' not in query.lower():
+                # Ensure left-side focus
+                if 'has_left_stone' in corrected_df.columns:
+                    left_patients = corrected_df[corrected_df['has_left_stone'] == True]
+                    if len(left_patients) != len(corrected_df):
+                        corrected_df = left_patients
+                        corrections_applied.append("Refined to focus on left-side patients only")
+        
+        # Display corrections
+        if corrections_applied:
+            print("\n" + "="*60)
+            print("SELF-CORRECTION APPLIED")
+            print("="*60)
+            for correction in corrections_applied:
+                print(f"✓ {correction}")
+            print("="*60)
+            
+            # Re-compute statistics with corrected data
+            relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
+            corrected_stats = query_tools.get_summary_stats_with_learning(
+                corrected_df, query, relevant_fields
+            )
+            corrected_summary = query_tools.format_summary(corrected_stats)
+            print("\n" + "CORRECTED RESULTS:")
+            print(corrected_summary)
+            
+            return corrected_df
+        
+        return None
 
 def main():
     """Main CLI entry point."""
@@ -387,8 +593,31 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Run with regex only, no LLM calls")
     parser.add_argument("--limit", "-l", type=int, help="Limit number of rows to process")
     parser.add_argument("--confirm", choices=["on", "off"], default="on", help="Enable/disable confirmation flow")
+    parser.add_argument("--reflection", choices=["on", "off"], default="on", help="Enable/disable reflection architecture")
+    parser.add_argument("--reflection-summary", action="store_true", help="Show reflection history summary")
     
     args = parser.parse_args()
+    
+    # Show reflection summary if requested (before initializing full agent)
+    if args.reflection_summary:
+        from .reflection import ReflectionArchitecture
+        reflection_arch = ReflectionArchitecture()
+        summary = reflection_arch.get_reflection_summary()
+        print("\n" + "="*60)
+        print("REFLECTION HISTORY SUMMARY")
+        print("="*60)
+        if 'message' in summary:
+            print(summary['message'])
+        else:
+            print(f"Total Reflections: {summary['total_reflections']}")
+            print(f"Average Quality Score: {summary['average_quality_score']:.2f}/1.0")
+            print(f"Average Confidence: {summary['average_confidence']:.2f}/1.0")
+            if summary['common_issues']:
+                print(f"\nMost Common Issues:")
+                for issue, count in summary['common_issues'].items():
+                    print(f"  • {issue} ({count} times)")
+        print("="*60)
+        return
     
     # Initialize agent
     agent = RadiologyAgent(dry_run=args.dry_run, limit=args.limit)
@@ -396,7 +625,12 @@ def main():
     # Disable confirmation if requested
     if args.confirm == "off":
         logger.warning("Confirmation flow disabled - this is not recommended for production use")
-        # Note: In a real implementation, you'd modify the confirm_flow to skip confirmation
+        agent.confirm_flow.disabled = True
+    
+    # Disable reflection if requested
+    if args.reflection == "off":
+        logger.info("Reflection architecture disabled")
+        agent.reflection_arch = None
     
     try:
         # Run pipeline

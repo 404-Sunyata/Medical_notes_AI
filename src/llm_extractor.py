@@ -1,28 +1,36 @@
-"""OpenAI LLM extractor with JSON schema validation and caching."""
+"""Unified LLM extractor with JSON schema validation and caching.
+Supports both OpenAI and Google Gemini APIs."""
 
 import json
 import time
 import sqlite3
 import os
 from typing import Dict, Any, Optional, List
-from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import logging
 
-from .config import OPENAI_API_KEY, MODEL_NAME, MAX_RETRIES, TIMEOUT_SECONDS, MODEL_COSTS, CACHE_DIR
+from .config import (
+    LLM_PROVIDER, MODEL_NAME, MAX_RETRIES, TIMEOUT_SECONDS, 
+    MODEL_COSTS, CACHE_DIR, get_llm_client
+)
 from .safety import check_text, create_cache_key, log_usage_stats
 from .llm_schema import RadiologyExtraction, validate_extraction_json, create_empty_extraction
 
 logger = logging.getLogger(__name__)
 
 class LLMExtractor:
-    """OpenAI LLM extractor with caching and error handling."""
+    """Unified LLM extractor with caching and error handling.
+    Supports both OpenAI and Google Gemini APIs."""
     
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.provider = LLM_PROVIDER
+        self.client = get_llm_client()
         self.model_name = MODEL_NAME
         self.cache_db = os.path.join(CACHE_DIR, "extraction_cache.db")
         self._init_cache()
+        
+        if self.client is None:
+            logger.warning(f"{self.provider.upper()} client not available - LLM extraction will be disabled")
     
     def _init_cache(self):
         """Initialize SQLite cache database."""
@@ -124,8 +132,19 @@ Return a JSON object with this exact structure:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((Exception,))
     )
+    def _call_llm_api(self, narrative: str) -> Dict[str, Any]:
+        """Call LLM API (OpenAI or Gemini) with retry logic."""
+        if self.provider == "openai":
+            return self._call_openai_api(narrative)
+        elif self.provider == "gemini":
+            return self._call_gemini_api(narrative)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+    
     def _call_openai_api(self, narrative: str) -> Dict[str, Any]:
         """Call OpenAI API with retry logic."""
+        from openai import OpenAI
+        
         start_time = time.time()
         
         try:
@@ -169,7 +188,7 @@ Return a JSON object with this exact structure:
                                 "type": "object",
                                 "properties": {
                                     "volume_ml": {"type": ["number", "null"]},
-                                    "wall": {"type": ["string", "null"], "enum": ["normal", "abnormal", null]}
+                                    "wall": {"type": ["string", "null"], "enum": ["normal", "abnormal", None]}
                                 },
                                 "required": ["volume_ml", "wall"]
                             },
@@ -197,7 +216,7 @@ Return a JSON object with this exact structure:
             cost = self._calculate_cost(tokens_used)
             processing_time = int((time.time() - start_time) * 1000)
             
-            logger.info(f"API call successful: {tokens_used['total_tokens']} tokens, ${cost:.4f}, {processing_time}ms")
+            logger.info(f"OpenAI API call successful: {tokens_used['total_tokens']} tokens, ${cost:.4f}, {processing_time}ms")
             
             return {
                 'extraction_json': extraction_json,
@@ -210,7 +229,155 @@ Return a JSON object with this exact structure:
             logger.error(f"JSON decode error: {e}")
             raise ValueError(f"Invalid JSON response: {e}")
         except Exception as e:
-            logger.error(f"API call failed: {e}")
+            logger.error(f"OpenAI API call failed: {e}")
+            raise
+    
+    def _call_gemini_api(self, narrative: str) -> Dict[str, Any]:
+        """Call Gemini API with retry logic."""
+        import google.generativeai as genai
+        
+        start_time = time.time()
+        
+        try:
+            # Safety check
+            safety_report = check_text(narrative)
+            if not safety_report["safe"]:
+                logger.warning(f"Potential PHI detected, using redacted text")
+                narrative = safety_report["redacted_text"]
+            
+            # Create prompt
+            system_prompt = self._create_system_prompt()
+            user_prompt = self._create_user_prompt(narrative)
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+            
+            # Get model - handle model name variations
+            model_name = self.model_name
+            
+            # Try different model name formats (including 2.5 models)
+            model = None
+            model_variants = [
+                model_name,  # Try original name first
+                f"{model_name}-latest",  # Try with -latest suffix
+                # Try 2.5 variants if 1.5 is specified
+                model_name.replace("gemini-1.5-flash", "gemini-2.5-flash"),
+                model_name.replace("gemini-1.5-pro", "gemini-2.5-pro"),
+                model_name.replace("gemini-1.5-flash", "gemini-1.5-flash-latest"),
+                model_name.replace("gemini-1.5-pro", "gemini-1.5-pro-latest"),
+                # Try 1.5 variants if 2.5 is specified
+                model_name.replace("gemini-2.5-flash", "gemini-1.5-flash-latest"),
+                model_name.replace("gemini-2.5-pro", "gemini-1.5-pro-latest"),
+            ]
+            
+            for variant in model_variants:
+                try:
+                    model = genai.GenerativeModel(variant)
+                    # Test if model is accessible by trying to get its name
+                    _ = model._model_name
+                    logger.info(f"Using Gemini model: {variant}")
+                    break
+                except Exception as e:
+                    logger.debug(f"Model variant {variant} failed: {e}")
+                    continue
+            
+            if model is None:
+                # Last resort: try to list available models and use the first matching one
+                try:
+                    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    logger.info(f"Available Gemini models: {available_models}")
+                    
+                    # Extract short names (last part after '/')
+                    available_short_names = [m.split('/')[-1] for m in available_models]
+                    
+                    # Try to find a matching model based on type (flash/pro)
+                    preferred_order = []
+                    if 'flash' in model_name.lower():
+                        preferred_order = [m for m in available_short_names if 'flash' in m.lower()]
+                    elif 'pro' in model_name.lower():
+                        preferred_order = [m for m in available_short_names if 'pro' in m.lower()]
+                    
+                    # If no preferred match, use any available model
+                    if not preferred_order:
+                        preferred_order = available_short_names
+                    
+                    # Try models in preferred order
+                    for model_short_name in preferred_order:
+                        try:
+                            model = genai.GenerativeModel(model_short_name)
+                            logger.info(f"Using auto-detected model: {model_short_name}")
+                            break
+                        except Exception as e:
+                            logger.debug(f"Auto-detected model {model_short_name} failed: {e}")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Could not list models: {e}")
+            
+            if model is None:
+                raise ValueError(f"Could not find a valid Gemini model. Tried: {model_variants}. Please check your API key and available models.")
+            
+            # Configure safety settings to allow medical content
+            from google.generativeai.types import HarmCategory, HarmBlockThreshold
+            
+            # Try most permissive settings - BLOCK_NONE for DANGEROUS_CONTENT
+            try:
+                safety_settings = {
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,  # Most permissive for medical data
+                }
+            except (AttributeError, ValueError):
+                # Fallback: Use numeric values
+                safety_settings = {
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: 1,  # BLOCK_ONLY_HIGH
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: 1,  # BLOCK_ONLY_HIGH
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: 1,  # BLOCK_ONLY_HIGH
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: 0,  # BLOCK_NONE
+                }
+            
+            # Configure generation - use dict format for compatibility
+            generation_config = {
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+            }
+            
+            # Make API call
+            response = model.generate_content(
+                full_prompt,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+            
+            # Extract response
+            content = response.text
+            extraction_json = json.loads(content)
+            
+            # Gemini doesn't provide token usage in the same way, estimate it
+            # Rough estimate: 1 token ≈ 4 characters
+            prompt_chars = len(full_prompt)
+            response_chars = len(content)
+            tokens_used = {
+                'prompt_tokens': prompt_chars // 4,
+                'completion_tokens': response_chars // 4,
+                'total_tokens': (prompt_chars + response_chars) // 4
+            }
+            
+            cost = self._calculate_cost(tokens_used)
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            logger.info(f"Gemini API call successful: {tokens_used['total_tokens']} tokens (estimated), ${cost:.4f}, {processing_time}ms")
+            
+            return {
+                'extraction_json': extraction_json,
+                'tokens_used': tokens_used,
+                'cost': cost,
+                'processing_time_ms': processing_time
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            raise ValueError(f"Invalid JSON response: {e}")
+        except Exception as e:
+            logger.error(f"Gemini API call failed: {e}")
             raise
     
     def _calculate_cost(self, tokens_used: Dict[str, int]) -> float:
@@ -254,7 +421,11 @@ Return a JSON object with this exact structure:
         
         # API call
         try:
-            result = self._call_openai_api(narrative)
+            if self.client is None:
+                logger.warning(f"LLM client not available for record {record_id}")
+                return create_empty_extraction()
+            
+            result = self._call_llm_api(narrative)
             extraction_json = result['extraction_json']
             tokens_used = result['tokens_used']
             cost = result['cost']

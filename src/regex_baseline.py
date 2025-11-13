@@ -67,6 +67,38 @@ def extract_stone_presence(text: str, side: str) -> str:
     
     text_lower = text.lower()
     
+    # First check for bilateral stones (implies both sides present)
+    bilateral_patterns = [
+        r'bilateral\s+(?:kidney\s+)?stone[s]?',
+        r'bilateral\s+(?:renal\s+)?stone[s]?',
+        r'stone[s]?\s+in\s+both\s+kidneys',
+        r'both\s+kidneys?\s+(?:have\s+)?stone[s]?'
+    ]
+    
+    for bilateral_pattern in bilateral_patterns:
+        if re.search(bilateral_pattern, text_lower):
+            # Check for negation
+            match = re.search(bilateral_pattern, text_lower)
+            if match:
+                start = max(0, match.start() - 50)
+                end = min(len(text_lower), match.end() + 50)
+                context = text_lower[start:end]
+                
+                # Check for negation patterns
+                is_negated = False
+                for neg_pattern in PATTERNS['negation']:
+                    if re.search(neg_pattern, context):
+                        is_negated = True
+                        break
+                
+                if not is_negated:
+                    return 'present'
+    
+    # Check for side-specific mentions with size (e.g., "left 1.3 cm")
+    compact_pattern = rf'{side}[:\s]+\d+(?:\.\d+)?'
+    if re.search(compact_pattern, text_lower):
+        return 'present'
+    
     # Check for negation patterns near stone mentions
     stone_patterns = PATTERNS['stone_presence'][side]
     
@@ -115,6 +147,26 @@ def extract_stone_size(text: str, side: str) -> Optional[float]:
     
     text_lower = text.lower()
     
+    # First check for bilateral stones format: "bilateral stones: right X cm, left Y cm"
+    bilateral_pattern = rf'bilateral\s+(?:kidney\s+)?stone[s]?[:\s]+.*?{side}\s+(\d+(?:\.\d+)?)\s*(?:cm|mm)'
+    bilateral_match = re.search(bilateral_pattern, text_lower)
+    if bilateral_match:
+        size = float(bilateral_match.group(1))
+        # Convert mm to cm if needed
+        if 'mm' in bilateral_match.group(0):
+            size = size / 10
+        return size
+    
+    # Also check for compact format: "right: X cm, left: Y cm" or "right X cm, left Y cm"
+    compact_pattern = rf'{side}[:\s]+(\d+(?:\.\d+)?)\s*(?:cm|mm)'
+    compact_match = re.search(compact_pattern, text_lower)
+    if compact_match:
+        size = float(compact_match.group(1))
+        # Convert mm to cm if needed
+        if 'mm' in compact_match.group(0):
+            size = size / 10
+        return size
+    
     # Look for size patterns near side-specific stone mentions
     stone_patterns = PATTERNS['stone_presence'][side]
     
@@ -139,7 +191,7 @@ def extract_stone_size(text: str, side: str) -> Optional[float]:
                         size = float(size_str)
                     
                     # Convert mm to cm if needed
-                    if 'mm' in context[context.find(size_str):context.find(size_str)+20]:
+                    if 'mm' in context[context.find(str(size_str)):context.find(str(size_str))+20]:
                         size = size / 10
                     
                     return size

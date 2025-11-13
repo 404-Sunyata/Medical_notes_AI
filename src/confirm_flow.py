@@ -21,6 +21,7 @@ class ConfirmFlow:
     
     def __init__(self):
         self.intent_parser = IntentParser()
+        self.disabled = False
     
     def get_user_confirmation(self, plan: PlanSummary, 
                             original_query: str = "") -> ConfirmationAction:
@@ -40,7 +41,7 @@ class ConfirmFlow:
         # Get user input
         while True:
             try:
-                response = input("\nDo you want me to proceed? (Yes/Edit/Cancel): ").strip().lower()
+                response = input("\nDo you want me to proceed? (yes/edit/cancel or y/e/c): ").strip().lower()
                 
                 if response in ['yes', 'y', 'proceed', 'go']:
                     return ConfirmationAction.YES
@@ -49,7 +50,7 @@ class ConfirmFlow:
                 elif response in ['cancel', 'c', 'no', 'quit', 'exit']:
                     return ConfirmationAction.CANCEL
                 else:
-                    print("Please enter 'Yes', 'Edit', or 'Cancel'")
+                    print("Please enter 'yes', 'edit', or 'cancel' (or 'y', 'e', 'c')")
                     continue
                     
             except KeyboardInterrupt:
@@ -348,6 +349,11 @@ class ConfirmFlow:
         Returns:
             Final confirmed plan or None if cancelled
         """
+        # Skip confirmation if disabled
+        if self.disabled:
+            logger.info("Confirmation flow disabled - auto-proceeding")
+            return initial_plan
+            
         current_plan = initial_plan
         
         while True:
