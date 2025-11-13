@@ -27,7 +27,7 @@ pip install google-generativeai
 # Create or edit .env file in the project root
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=your_actual_api_key_here
-GEMINI_MODEL_NAME=gemini-1.5-flash
+GEMINI_MODEL_NAME=gemini-2.5-flash
 ```
 
 **Option B: Export in Terminal**
