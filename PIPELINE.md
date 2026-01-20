@@ -9,114 +9,43 @@
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 1: DOMAIN VALIDATION                                 │
+│                    PHASE 1: LLM-ONLY QUERY PARSING                            │
 │                                                                               │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ intent_parser.parse_query_with_domain_validation()                  │   │
+│  │ intent_parser.parse_query() - LLM-Only                              │   │
 │  │                                                                      │   │
-│  │ 1. Medical Relevance Check                                          │   │
-│  │    • Fast path: Keyword detection (medical/non-medical)             │   │
-│  │    • Check for medical terms (patient, stone, kidney, etc.)         │   │
-│  │    • Check for non-medical terms (weather, recipe, etc.)            │   │
+│  │ 1. LLM Parsing                                                       │   │
+│  │    • Create comprehensive prompt with data schema context           │   │
+│  │    • Call Gemini/OpenAI API                                         │   │
+│  │    • LLM understands query intent, relevance, and data availability │   │
+│  │    • Parse JSON response                                            │   │
+│  │    • Create UserQuery object                                        │   │
 │  │                                                                      │   │
-│  │ 2. Data Availability Check                                          │   │
-│  │    • Check for unavailable fields (gender, age, weight)             │   │
-│  │    • Detect unknown variables (heart rate, temperature)             │   │
-│  │    • Validate against available dataset fields                      │   │
-│  │                                                                      │   │
-│  │ 3. Return Validation Result                                         │   │
-│  │    • is_medical: bool                                               │   │
-│  │    • data_available: bool                                           │   │
-│  │    • message: str                                                   │   │
-│  │    • suggestion: str                                                │   │
+│  │ Return: UserQuery with                                              │   │
+│  │    • goal: What user wants to accomplish                            │   │
+│  │    • filters: Extracted filters (side, size, date, etc.)            │   │
+│  │    • outputs: Requested output columns                              │   │
+│  │    • input_fields: Required data fields                             │   │
+│  │    • assumptions: Made assumptions                                  │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────────────────────┘
                                     │
-                    ┌───────────────┴───────────────┐
-                    │                               │
-           ┌────────▼────────┐            ┌────────▼────────┐
-           │  Not Medical    │            │  Medical &      │
-           │  or Data        │            │  Data Available │
-           │  Unavailable    │            │                 │
-           └────────┬────────┘            └────────┬────────┘
-                    │                               │
-                    │                               │
-        ┌───────────▼───────────┐                  │
-        │ Offer General LLM     │                  │
-        │ Response or Exit      │                  │
-        └───────────────────────┘                  │
-                                                    │
-                                    ┌───────────────┘
-                                    │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 2: QUERY PARSING (LLM-First)                        │
+│                    PHASE 2: PLAN CREATION & CONFIRMATION                     │
 │                                                                               │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ PRIMARY: LLM Parsing                                                │   │
-│  │   intent_parser._parse_query_with_llm()                            │   │
-│  │   • Create comprehensive prompt                                     │   │
-│  │   • Call OpenAI API (if available)                                 │   │
-│  │   • Parse JSON response                                            │   │
-│  │   • Create UserQuery object                                        │   │
-│  │   • Return: UserQuery with filters, outputs, goal                  │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                    │                                         │
-│                    ┌───────────────┴───────────────┐                        │
-│                    │                               │                        │
-│          ┌─────────▼─────────┐         ┌──────────▼──────────┐             │
-│          │  LLM Success      │         │  LLM Failed         │             │
-│          │  (has filters)    │         │  (no filters)       │             │
-│          └─────────┬─────────┘         └──────────┬──────────┘             │
-│                    │                               │                        │
-│                    │                               ▼                        │
-│                    │              ┌─────────────────────────────────────┐  │
-│                    │              │ FALLBACK: Pattern Matching          │  │
-│                    │              │   intent_parser.parse_query()       │  │
-│                    │              │   • Extract filters with regex      │  │
-│                    │              │   • Extract outputs and inputs      │  │
-│                    │              │   • Generate assumptions            │  │
-│                    │              └─────────────────┬───────────────────┘  │
-│                    │                                │                       │
-│                    │                    ┌───────────┴───────────┐          │
-│                    │                    │                       │          │
-│                    │          ┌─────────▼─────────┐  ┌─────────▼─────────┐│
-│                    │          │ Pattern Success   │  │ Pattern Failed    ││
-│                    │          └─────────┬─────────┘  └─────────┬─────────┘│
-│                    │                    │                       │          │
-│                    │                    │                       ▼          │
-│                    │                    │          ┌─────────────────────┐ │
-│                    │                    │          │ FINAL: Learned      │ │
-│                    │                    │          │ Patterns            │ │
-│                    │                    │          │ parse_query_with_   │ │
-│                    │                    │          │ learning()          │ │
-│                    │                    │          └─────────────────────┘ │
-│                    │                    │                                  │
-│                    └────────────────────┴──────────────────────────────────┘
-│                                         │
-└─────────────────────────────────────────┼──────────────────────────────────┘
-                                          │
-                                          ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 3: PLAN CREATION & CONFIRMATION                     │
-│                                                                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ 1. Create Plan Summary                                              │   │
-│  │    intent_parser.create_plan_summary()                             │   │
-│  │    • Goal: What user wants to accomplish                           │   │
-│  │    • Input Fields: Required data fields                            │   │
-│  │    • Filters: Applied filters                                      │   │
-│  │    • Outputs: Returned information                                 │   │
-│  │    • Assumptions: Made assumptions                                 │   │
-│  │    • Estimated Rows: Expected matching records                     │   │
+│  │ 1. Estimate Matching Rows                                           │   │
+│  │    query_tools.estimate_matching_rows(filters)                     │   │
+│  │    • Apply filters directly (no adaptive strategy needed)           │   │
+│  │    • Return estimated number of matching records                    │   │
 │  │                                                                      │   │
-│  │ 2. Estimate Matching Rows                                           │   │
-│  │    query_tools.estimate_matching_rows()                            │   │
-│  │    • Apply filters to estimate count                               │   │
-│  │    • Return estimated number of matching records                   │   │
+│  │ 2. Create Plan Summary                                              │   │
+│  │    intent_parser.create_plan_summary(user_query, estimated_rows)   │   │
+│  │    • Display goal, filters, outputs, assumptions                    │   │
 │  │                                                                      │   │
 │  │ 3. User Confirmation                                                │   │
-│  │    confirm_flow.run_confirmation_loop()                            │   │
+│  │    confirm_flow.run_confirmation_loop(plan, query)                 │   │
 │  │    • Display plan summary                                          │   │
 │  │    • Get user input (yes/edit/cancel)                              │   │
 │  │    • Handle edit requests                                          │   │
@@ -135,18 +64,28 @@
                                     │
                                     ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    PHASE 4: ADAPTIVE FILTERING                                │
+│                    PHASE 3: DIRECT FILTERING                                  │
 │                                                                               │
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ query_tools.apply_filters_with_learning()                          │   │
+│  │ query_tools.apply_filters(filters)                                  │   │
 │  │                                                                      │   │
-│  │ 1. Dynamic Learning Phase                                           │   │
-│  │    • Detect new medical concepts                                    │   │
-│  │    • Generate filter logic using LLM                                │   │
-│  │    • Update learned patterns                                        │   │
+│  │ LLM handles all intent understanding, so we use simple direct       │   │
+│  │ filtering without complex adaptive strategies:                       │   │
 │  │                                                                      │   │
-│  │ 2. Adaptive Filtering Strategy                                      │   │
-│  │    • Determine query intent (precise/exploratory/comparative)       │   │
+│  │ 1. Basic Validation                                                 │   │
+│  │    • Check for invalid filter combinations (min > max)              │   │
+│  │                                                                      │   │
+│  │ 2. Apply Filters Directly                                           │   │
+│  │    • Side filter (left/right/bilateral)                             │   │
+│  │    • Stone presence filter                                          │   │
+│  │    • Size filters (min/max) with side awareness                     │   │
+│  │    • Date filters (start_year/end_year)                             │   │
+│  │    • Bladder volume filters                                         │   │
+│  │                                                                      │   │
+│  │ 3. Add Matched Reason                                               │   │
+│  │    • Explain why each row matches the filters                       │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │   │
 │  │    • Validate filters for conflicts                                 │   │
 │  │    • Optimize filter application order                              │   │
 │  │                                                                      │   │
@@ -303,7 +242,7 @@
                         ▼                               ▼
                 ┌──────────────┐              ┌──────────────┐
                 │   Filtering  │              │  Statistics  │
-                │   (adaptive) │              │  (dynamic)   │
+                │  (direct)    │              │  (standard)  │
                 └──────┬───────┘              └──────┬───────┘
                        │                               │
                        └───────────────┬───────────────┘

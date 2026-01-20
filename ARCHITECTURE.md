@@ -12,14 +12,14 @@
 
 ## 🎯 System Overview
 
-The Medical AI Agent is a comprehensive system that transforms de-identified radiology narratives into structured data and enables natural language querying of the extracted information. The system uses a hybrid approach combining rule-based extraction, LLM-based understanding, and adaptive learning capabilities.
+The Medical AI Agent is a comprehensive system that transforms de-identified radiology narratives into structured data and enables natural language querying of the extracted information. The system uses an LLM-first approach where Gemini/OpenAI handles all query understanding and intent parsing, with simple direct filtering based on extracted filters.
 
 ### Core Capabilities
 - **Data Extraction**: Converts unstructured radiology narratives to structured data
-- **Natural Language Querying**: Processes medical queries in natural language
-- **Adaptive Filtering**: Dynamically adjusts filtering logic based on query intent
-- **Self-Assessment**: Reflection architecture for quality assurance
-- **Dynamic Learning**: Learns new patterns and improves over time
+- **LLM-Only Query Processing**: Uses LLM (Gemini/OpenAI) for all query parsing and understanding - no complex rule-based systems
+- **Direct Filtering**: Simple, direct filter application based on LLM-extracted filters
+- **Self-Assessment**: Reflection architecture for quality assurance (optional)
+- **Natural Language Interface**: Query medical data using natural language
 
 ---
 
@@ -64,16 +64,15 @@ The Medical AI Agent is a comprehensive system that transforms de-identified rad
 │                                                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │  QUERY PROCESSING LAYER                                       │    │
-│  │  • intent_parser.py: LLM-first query parsing                  │    │
-│  │    - Domain validation                                        │    │
-│  │    - Medical relevance checking                               │    │
-│  │    - Data availability checking                               │    │
-│  │    - Dynamic pattern learning                                 │    │
+│  │  • intent_parser.py: LLM-only query parsing                   │    │
+│  │    - Direct LLM parsing with data schema context              │    │
+│  │    - LLM handles relevance and data availability              │    │
+│  │    - Extracts filters, outputs, and goals                     │    │
 │  │  • confirm_flow.py: User confirmation and plan editing        │    │
-│  │  • query_tools.py: Adaptive filtering and statistics          │    │
-│  │    - Dynamic learning for filters                             │    │
-│  │    - Adaptive filtering strategy                              │    │
+│  │  • query_tools.py: Direct filtering and statistics            │    │
+│  │    - Simple direct filter application                         │    │
 │  │    - Statistical computation                                  │    │
+│  │    - Results formatting                                       │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 │                                                                        │
 │  ┌──────────────────────────────────────────────────────────────┐    │

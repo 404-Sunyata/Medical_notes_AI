@@ -86,7 +86,7 @@ class LLMExtractor:
         """Create system prompt for the LLM."""
         return """You are a clinical NLP assistant specialized in extracting structured information from radiology narratives. 
 
-Your task is to extract information about kidney stones, kidney sizes, and bladder volume from radiology reports.
+Your task is to extract information about kidney stones, kidney sizes, hydronephrosis, and bladder volume from radiology reports.
 
 IMPORTANT RULES:
 1. Return ONLY valid JSON that matches the exact schema provided
@@ -94,8 +94,13 @@ IMPORTANT RULES:
 3. Handle negation carefully - "no stones" means "absent", not "present"
 4. For stone sizes, extract only the largest dimension if multiple are given
 5. For kidney sizes, preserve the exact format as "L x W x AP cm" or "L x W cm"
-6. Do not make assumptions or guesses beyond what is explicitly stated
-7. If a finding is not mentioned at all, use "unclear" for status and null for measurements
+6. For hydronephrosis, extract status for each kidney side (left/right) as "present", "absent", or "unclear"
+   - Look for terms like: hydronephrosis, hydroureteronephrosis, pelviectasis, caliectasis, collecting system dilation
+   - If hydronephrosis is mentioned for a specific side, mark that side as "present"
+   - If explicitly stated as absent (e.g., "no hydronephrosis"), mark as "absent"
+   - If not mentioned at all, use "unclear"
+7. Do not make assumptions or guesses beyond what is explicitly stated
+8. If a finding is not mentioned at all, use "unclear" for status and null for measurements
 
 Focus on accuracy over completeness. It's better to return null than to guess."""
     
@@ -112,12 +117,14 @@ Return a JSON object with this exact structure:
   "right": {{
     "stone_status": "present"|"absent"|"unclear",
     "stone_size_cm": number|null,
-    "kidney_size_cm": "L x W x AP cm"|null
+    "kidney_size_cm": "L x W x AP cm"|null,
+    "hydronephrosis_status": "present"|"absent"|"unclear"
   }},
   "left": {{
     "stone_status": "present"|"absent"|"unclear", 
     "stone_size_cm": number|null,
-    "kidney_size_cm": "L x W x AP cm"|null
+    "kidney_size_cm": "L x W x AP cm"|null,
+    "hydronephrosis_status": "present"|"absent"|"unclear"
   }},
   "bladder": {{
     "volume_ml": number|null,
@@ -171,18 +178,20 @@ Return a JSON object with this exact structure:
                                 "properties": {
                                     "stone_status": {"type": "string", "enum": ["present", "absent", "unclear"]},
                                     "stone_size_cm": {"type": ["number", "null"]},
-                                    "kidney_size_cm": {"type": ["string", "null"]}
+                                    "kidney_size_cm": {"type": ["string", "null"]},
+                                    "hydronephrosis_status": {"type": "string", "enum": ["present", "absent", "unclear"]}
                                 },
-                                "required": ["stone_status", "stone_size_cm", "kidney_size_cm"]
+                                "required": ["stone_status", "stone_size_cm", "kidney_size_cm", "hydronephrosis_status"]
                             },
                             "left": {
                                 "type": "object", 
                                 "properties": {
                                     "stone_status": {"type": "string", "enum": ["present", "absent", "unclear"]},
                                     "stone_size_cm": {"type": ["number", "null"]},
-                                    "kidney_size_cm": {"type": ["string", "null"]}
+                                    "kidney_size_cm": {"type": ["string", "null"]},
+                                    "hydronephrosis_status": {"type": "string", "enum": ["present", "absent", "unclear"]}
                                 },
-                                "required": ["stone_status", "stone_size_cm", "kidney_size_cm"]
+                                "required": ["stone_status", "stone_size_cm", "kidney_size_cm", "hydronephrosis_status"]
                             },
                             "bladder": {
                                 "type": "object",

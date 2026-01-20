@@ -4,6 +4,7 @@ import sys
 from typing import Optional, Dict, Any, List
 from enum import Enum
 import logging
+import pandas as pd
 
 from .llm_schema import PlanSummary, UserQuery
 from .intent_parser import IntentParser
@@ -22,6 +23,7 @@ class ConfirmFlow:
     def __init__(self):
         self.intent_parser = IntentParser()
         self.disabled = False
+        self.structured_df: Optional[pd.DataFrame] = None
     
     def get_user_confirmation(self, plan: PlanSummary, 
                             original_query: str = "") -> ConfirmationAction:
@@ -328,7 +330,8 @@ class ConfirmFlow:
         try:
             new_query = input("> ").strip()
             if new_query:
-                user_query = self.intent_parser.parse_query(new_query)
+                # Use schema-aware parsing if structured_df is available
+                user_query = self.intent_parser.parse_query(new_query, self.structured_df)
                 return self.intent_parser.create_plan_summary(user_query)
             else:
                 print("No query entered.")
@@ -338,13 +341,15 @@ class ConfirmFlow:
             return None
     
     def run_confirmation_loop(self, initial_plan: PlanSummary, 
-                            original_query: str = "") -> Optional[PlanSummary]:
+                            original_query: str = "",
+                            structured_df: Optional[pd.DataFrame] = None) -> Optional[PlanSummary]:
         """
         Run the complete confirmation loop until user confirms or cancels.
         
         Args:
             initial_plan: Initial plan to confirm
             original_query: Original user query
+            structured_df: Optional structured DataFrame for schema-aware parsing
             
         Returns:
             Final confirmed plan or None if cancelled
@@ -355,6 +360,7 @@ class ConfirmFlow:
             return initial_plan
             
         current_plan = initial_plan
+        self.structured_df = structured_df  # Store for use in edit/start_over
         
         while True:
             action = self.get_user_confirmation(current_plan, original_query)

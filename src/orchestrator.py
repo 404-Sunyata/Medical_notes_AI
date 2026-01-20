@@ -145,12 +145,14 @@ class RadiologyAgent:
                         'right': {
                             'stone_status': llm_extraction.right.stone_status,
                             'stone_size_cm': llm_extraction.right.stone_size_cm,
-                            'kidney_size_cm': llm_extraction.right.kidney_size_cm
+                            'kidney_size_cm': llm_extraction.right.kidney_size_cm,
+                            'hydronephrosis_status': llm_extraction.right.hydronephrosis_status
                         },
                         'left': {
                             'stone_status': llm_extraction.left.stone_status,
                             'stone_size_cm': llm_extraction.left.stone_size_cm,
-                            'kidney_size_cm': llm_extraction.left.kidney_size_cm
+                            'kidney_size_cm': llm_extraction.left.kidney_size_cm,
+                            'hydronephrosis_status': llm_extraction.left.hydronephrosis_status
                         },
                         'bladder': {
                             'volume_ml': llm_extraction.bladder.volume_ml,
@@ -170,9 +172,11 @@ class RadiologyAgent:
                 'right_stone': extraction['right']['stone_status'],
                 'right_stone_size_cm': extraction['right']['stone_size_cm'],
                 'right_kidney_size_cm': extraction['right']['kidney_size_cm'],
+                'right_hydronephrosis': extraction['right'].get('hydronephrosis_status', 'unclear'),
                 'left_stone': extraction['left']['stone_status'],
                 'left_stone_size_cm': extraction['left']['stone_size_cm'],
                 'left_kidney_size_cm': extraction['left']['kidney_size_cm'],
+                'left_hydronephrosis': extraction['left'].get('hydronephrosis_status', 'unclear'),
                 'bladder_volume_ml': extraction['bladder']['volume_ml'],
                 'history_summary': extraction['history_summary'],
                 'matched_reason': 'No specific filters applied'
@@ -191,7 +195,7 @@ class RadiologyAgent:
     
     def process_user_query(self, query: str, structured_df: pd.DataFrame) -> Optional[pd.DataFrame]:
         """
-        Process a user query and return filtered results with reflection.
+        Process a user query using LLM-only approach and return filtered results.
         
         Args:
             query: Natural language query
@@ -205,83 +209,68 @@ class RadiologyAgent:
         
         logger.info(f"Processing user query: {query}")
         
-        # Check domain relevance first
-        domain_result = self.intent_parser.parse_query_with_domain_validation(query)
+        # Use LLM to parse query directly with dataset schema context
+        user_query = self.intent_parser.parse_query(query, structured_df)
         
-        if not domain_result['domain_relevant']:
-            # Query is not relevant to medical radiology domain
+        if not user_query or not user_query.filters:
+            logger.warning("LLM parsing failed or returned empty filters")
             print("\n" + "="*60)
-            print("DOMAIN VALIDATION")
+            print("QUERY PARSING")
             print("="*60)
-            print(domain_result['message'])
-            print(f"\nSuggestion: {domain_result['suggestion']}")
-            
-            # Ask user if they want general LLM response
-            user_choice = input("\nWould you like a general answer? (y/n): ").lower().strip()
-            
-            if user_choice in ['y', 'yes']:
-                print("\n" + "="*60)
-                print("GENERAL LLM RESPONSE")
-                print("="*60)
-                print(domain_result['general_response'])
-                print("\nNote: This information is from general knowledge, not from the medical dataset.")
-            else:
-                print("Please ask about medical radiology topics like patient records, kidney stones, bladder conditions, or imaging findings.")
-            
+            print("Unable to parse the query. Please try rephrasing your question.")
             return None
-        
-        # Check if data is available for the query
-        if not domain_result.get('data_available', True):
-            # Query requires data that is not available in the dataset
-            print("\n" + "="*60)
-            print("DATA AVAILABILITY CHECK")
-            print("="*60)
-            print(domain_result['message'])
-            print(f"\nSuggestion: {domain_result['suggestion']}")
-            
-            if 'available_fields' in domain_result:
-                print(f"\nAvailable data fields in this dataset:")
-                for field in domain_result['available_fields']:
-                    print(f"  • {field}")
-            
-            return None
-        
-        # Query is relevant to medical domain and data is available, proceed with normal processing
-        user_query = domain_result['user_query']
         
         # Create query tools
         query_tools = QueryTools(structured_df)
         
-        # Estimate matching rows with query context
-        query_context = {'query_text': query}
-        estimated_rows = query_tools.estimate_matching_rows(user_query.filters, query_context)
+        # Estimate matching rows
+        estimated_rows = query_tools.estimate_matching_rows(user_query.filters)
         
         # Create plan summary
         plan = self.intent_parser.create_plan_summary(user_query, estimated_rows)
         
-        # Get user confirmation
-        confirmed_plan = self.confirm_flow.run_confirmation_loop(plan, query)
+        # Get user confirmation (pass structured_df for schema-aware parsing)
+        confirmed_plan = self.confirm_flow.run_confirmation_loop(plan, query, structured_df)
         if not confirmed_plan:
             logger.info("User cancelled the operation")
             return None
         
-        # Apply filters with dynamic learning
-        filtered_df = query_tools.apply_filters_with_learning(confirmed_plan.filters, query)
+        # Apply filters directly (no adaptive strategy needed - LLM handles intent)
+        filtered_df = query_tools.apply_filters(confirmed_plan.filters)
+        
+        # Handle distinct clause for patient counting (if not already applied in apply_filters)
+        # Count patients vs rows for display
+        if 'distinct' in confirmed_plan.filters and 'recordid' in filtered_df.columns:
+            distinct_col = confirmed_plan.filters.get('distinct', 'recordid')
+            patient_count = filtered_df[distinct_col].nunique()
+            row_count = len(filtered_df)
+            if row_count != patient_count:
+                logger.info(f"Count: {row_count} rows representing {patient_count} unique {distinct_col}")
+        else:
+            patient_count = len(filtered_df)
+            row_count = len(filtered_df)
         
         # Save filtered results
         if len(filtered_df) > 0:
             save_path = save_structured_data(filtered_df, 'filtered', 'csv')
             logger.info(f"Filtered results saved to {save_path}")
         
-        # Display summary with dynamic learning - only compute stats for relevant fields
+        # Display summary - compute stats for relevant fields
         relevant_fields = confirmed_plan.input_fields + [str(k) for k in confirmed_plan.filters.keys()]
-        stats = query_tools.get_summary_stats_with_learning(filtered_df, query, relevant_fields)
+        stats = query_tools.get_summary_stats(filtered_df, relevant_fields, query)
+        
+        # Update count in stats if distinct was used
+        if 'distinct' in confirmed_plan.filters and 'recordid' in filtered_df.columns:
+            stats['total_count'] = patient_count
+            stats['row_count'] = row_count
+        
         summary_text = query_tools.format_summary(stats)
         print("\n" + summary_text)
         
         # REFLECTION STAGE: Reflect on the initial answer (if enabled)
         if self.reflection_arch is not None:
             processing_time = time.time() - start_time
+            logger.info("Running reflection analysis...")
             reflection_result = self.reflection_arch.reflect_on_answer(
                 query=query,
                 user_query=user_query,
@@ -300,6 +289,8 @@ class RadiologyAgent:
                 )
                 if corrected_df is not None:
                     return corrected_df
+        else:
+            logger.info("Reflection stage skipped (reflection disabled)")
         
         return filtered_df
     
@@ -394,8 +385,8 @@ class RadiologyAgent:
                 # Check if it's a visualization request
                 if any(word in query.lower() for word in ['plot', 'chart', 'graph', 'visualize']):
                     print("Creating visualizations...")
-                    # Parse query to determine relevant fields
-                    user_query = self.intent_parser.parse_query(query)
+                    # Parse query to determine relevant fields with dataset schema
+                    user_query = self.intent_parser.parse_query(query, structured_df)
                     relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
                     plots = self.create_visualizations(structured_df, relevant_fields)
                     if plots:
@@ -408,8 +399,8 @@ class RadiologyAgent:
                 if result_df is not None and len(result_df) > 0:
                     print(f"\nFound {len(result_df)} matching records.")
                     
-                    # Parse the query to get relevant fields for visualizations
-                    user_query = self.intent_parser.parse_query(query)
+                    # Parse the query to get relevant fields for visualizations with dataset schema
+                    user_query = self.intent_parser.parse_query(query, structured_df)
                     relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
                     
                     # Offer additional options
@@ -573,8 +564,8 @@ class RadiologyAgent:
             
             # Re-compute statistics with corrected data
             relevant_fields = user_query.input_fields + [str(k) for k in user_query.filters.keys()]
-            corrected_stats = query_tools.get_summary_stats_with_learning(
-                corrected_df, query, relevant_fields
+            corrected_stats = query_tools.get_summary_stats(
+                corrected_df, relevant_fields, query
             )
             corrected_summary = query_tools.format_summary(corrected_stats)
             print("\n" + "CORRECTED RESULTS:")

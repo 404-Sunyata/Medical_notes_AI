@@ -4,9 +4,10 @@ A Python AI agent that uses OpenAI (ChatGPT) API to transform de-identified radi
 
 ## Features
 
+- **LLM-Only Architecture**: Uses Gemini/OpenAI LLM for all query parsing and understanding - no complex rule-based systems
 - **Natural Language Query Processing**: Parse user questions like "How many patients had left kidney stones > 1 cm?"
 - **Intent → Plan → Confirm Workflow**: Always confirm extraction plans before processing
-- **Dual Extraction Methods**: Regex baseline + LLM extraction with OpenAI API
+- **Dual Extraction Methods**: Regex baseline + LLM extraction with OpenAI/Gemini API
 - **Structured Data Output**: Patient-imaging level data with stone status, sizes, and measurements
 - **Interactive Mode**: Query and visualize data with natural language
 - **Safety Features**: PHI detection and redaction before API calls

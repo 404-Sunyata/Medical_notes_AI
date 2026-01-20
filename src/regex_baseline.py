@@ -297,6 +297,67 @@ def extract_history_summary(text: str) -> Optional[str]:
     
     return None
 
+def extract_hydronephrosis_presence(text: str, side: str) -> str:
+    """
+    Extract hydronephrosis presence for a specific side using regex.
+    
+    Args:
+        text: Radiology narrative text
+        side: 'right' or 'left'
+        
+    Returns:
+        'present', 'absent', or 'unclear'
+    """
+    if side not in ['right', 'left']:
+        raise ValueError("Side must be 'right' or 'left'")
+    
+    text_lower = text.lower()
+    
+    # Patterns for hydronephrosis (including synonyms)
+    hydronephrosis_patterns = [
+        rf'\b{side}\s+(?:kidney|renal)\s+hydronephrosis\b',
+        rf'\bhydronephrosis\s+of\s+the\s+{side}\s+(?:kidney|renal)\b',
+        rf'\b{side}\s+hydronephrosis\b',
+        rf'\b{side}\s+hydroureteronephrosis\b',
+        rf'\b{side}\s+pelviectasis\b',
+        rf'\b{side}\s+caliectasis\b',
+        rf'\b{side}\s+(?:kidney|renal)\s+collecting\s+system\s+dilat(?:ation|ed)\b',
+        rf'\b{side}\s+(?:kidney|renal)\s+pelvis\s+dilat(?:ation|ed)\b',
+    ]
+    
+    # Check for presence patterns
+    for pattern in hydronephrosis_patterns:
+        matches = list(re.finditer(pattern, text_lower))
+        for match in matches:
+            # Check for negation in surrounding context (50 chars before/after)
+            start = max(0, match.start() - 50)
+            end = min(len(text_lower), match.end() + 50)
+            context = text_lower[start:end]
+            
+            # Check for negation patterns
+            is_negated = False
+            for neg_pattern in PATTERNS['negation']:
+                if re.search(neg_pattern, context):
+                    is_negated = True
+                    break
+            
+            if not is_negated:
+                return 'present'
+    
+    # Check for explicit absence
+    absence_patterns = [
+        f'no {side} hydronephrosis',
+        f'no {side} kidney hydronephrosis',
+        f'{side} kidney no hydronephrosis',
+        f'{side} kidney without hydronephrosis'
+    ]
+    
+    for pattern in absence_patterns:
+        if re.search(pattern, text_lower):
+            return 'absent'
+    
+    return 'unclear'
+
 def extract_regex_baseline(narrative: str) -> Dict[str, Any]:
     """
     Extract all information using regex baseline.
@@ -311,12 +372,14 @@ def extract_regex_baseline(narrative: str) -> Dict[str, Any]:
         'right': {
             'stone_status': extract_stone_presence(narrative, 'right'),
             'stone_size_cm': extract_stone_size(narrative, 'right'),
-            'kidney_size_cm': extract_kidney_size(narrative, 'right')
+            'kidney_size_cm': extract_kidney_size(narrative, 'right'),
+            'hydronephrosis_status': extract_hydronephrosis_presence(narrative, 'right')
         },
         'left': {
             'stone_status': extract_stone_presence(narrative, 'left'),
             'stone_size_cm': extract_stone_size(narrative, 'left'),
-            'kidney_size_cm': extract_kidney_size(narrative, 'left')
+            'kidney_size_cm': extract_kidney_size(narrative, 'left'),
+            'hydronephrosis_status': extract_hydronephrosis_presence(narrative, 'left')
         },
         'bladder': {
             'volume_ml': extract_bladder_volume(narrative),

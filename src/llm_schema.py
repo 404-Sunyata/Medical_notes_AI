@@ -19,6 +19,10 @@ class KidneySide(BaseModel):
         None,
         description="Kidney dimensions in format 'L x W x AP cm' or 'L x W cm', null if not mentioned"
     )
+    hydronephrosis_status: Literal["present", "absent", "unclear"] = Field(
+        default="unclear",
+        description="Hydronephrosis presence status for this kidney side (present/absent/unclear)"
+    )
     
     @validator('stone_size_cm')
     def validate_stone_size(cls, v):
@@ -118,6 +122,10 @@ class StructuredOutput(BaseModel):
         None,
         description="Right kidney dimensions"
     )
+    right_hydronephrosis: Literal["present", "absent", "unclear"] = Field(
+        default="unclear",
+        description="Right kidney hydronephrosis status"
+    )
     left_stone: Literal["present", "absent", "unclear"] = Field(
         description="Left kidney stone status"
     )
@@ -128,6 +136,10 @@ class StructuredOutput(BaseModel):
     left_kidney_size_cm: Optional[str] = Field(
         None,
         description="Left kidney dimensions"
+    )
+    left_hydronephrosis: Literal["present", "absent", "unclear"] = Field(
+        default="unclear",
+        description="Left kidney hydronephrosis status"
     )
     bladder_volume_ml: Optional[float] = Field(
         None,
@@ -204,8 +216,8 @@ def create_empty_extraction() -> RadiologyExtraction:
         Empty RadiologyExtraction object
     """
     return RadiologyExtraction(
-        right=KidneySide(stone_status="unclear"),
-        left=KidneySide(stone_status="unclear"),
+        right=KidneySide(stone_status="unclear", hydronephrosis_status="unclear"),
+        left=KidneySide(stone_status="unclear", hydronephrosis_status="unclear"),
         bladder=Bladder(),
         history_summary=None,
         key_sentences=None
@@ -233,9 +245,11 @@ def extraction_to_structured(extraction: RadiologyExtraction,
         right_stone=extraction.right.stone_status,
         right_stone_size_cm=extraction.right.stone_size_cm,
         right_kidney_size_cm=extraction.right.kidney_size_cm,
+        right_hydronephrosis=extraction.right.hydronephrosis_status,
         left_stone=extraction.left.stone_status,
         left_stone_size_cm=extraction.left.stone_size_cm,
         left_kidney_size_cm=extraction.left.kidney_size_cm,
+        left_hydronephrosis=extraction.left.hydronephrosis_status,
         bladder_volume_ml=extraction.bladder.volume_ml,
         history_summary=extraction.history_summary,
         matched_reason=matched_reason

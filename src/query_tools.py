@@ -226,42 +226,229 @@ class QueryTools:
         if 'imaging_date' in self.df.columns:
             self.df['imaging_year'] = self.df['imaging_date'].dt.year
     
-    def apply_filters(self, filters: Dict[str, Any], query_context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    def apply_filters(self, filters: Dict[str, Any]) -> pd.DataFrame:
         """
-        Apply filters to the DataFrame with adaptive logic based on query context.
+        Apply filters to the DataFrame. LLM handles intent, so we use simple direct filtering.
         
         Args:
             filters: Dictionary of filters to apply
-            query_context: Optional context about the query for adaptive filtering
             
         Returns:
             Filtered DataFrame
         """
-        # Validate and optimize filters
-        validation = self._validate_and_suggest_filters(filters, query_context)
+        # Log what filters we're applying
+        if filters:
+            logger.info(f"Applying filters: {list(filters.keys())}")
+        else:
+            logger.warning("apply_filters called with empty filters dict - will return all rows!")
         
-        if not validation['is_valid']:
-            logger.warning(f"Filter validation failed: {validation['warnings']}")
-            # Return empty DataFrame for invalid filters
-            return self.df.iloc[0:0].copy()
+        # Basic validation - check for invalid filter combinations
+        if 'min_size_cm' in filters and 'max_size_cm' in filters:
+            min_size = filters.get('min_size_cm')
+            max_size = filters.get('max_size_cm')
+            if min_size is not None and max_size is not None and min_size > max_size:
+                logger.warning(f"Invalid filter: min_size_cm ({min_size}) > max_size_cm ({max_size})")
+                return self.df.iloc[0:0].copy()
         
-        # Log warnings and suggestions
-        if validation['warnings']:
-            for warning in validation['warnings']:
-                logger.warning(f"Filter warning: {warning}")
+        filtered_df = self.df.copy()
         
-        if validation['suggestions']:
-            for suggestion in validation['suggestions']:
-                logger.info(f"Filter suggestion: {suggestion}")
+        # Apply side filter
+        if 'side' in filters:
+            filtered_df = self._apply_side_filter(filtered_df, filters['side'])
         
-        # Use optimized filters
-        optimized_filters = validation['optimized_filters']
+        # Apply stone presence filter
+        if 'stone_presence' in filters:
+            filtered_df = self._apply_presence_filter(filtered_df, filters['stone_presence'])
         
-        # Determine filtering strategy based on context
-        strategy = self._determine_filtering_strategy(optimized_filters, query_context)
+        # Apply size filters
+        if 'min_size_cm' in filters or 'max_size_cm' in filters:
+            filtered_df = self._apply_size_filters(filtered_df, filters)
         
-        # Apply filters using the determined strategy
-        filtered_df = self._apply_adaptive_filters(self.df.copy(), optimized_filters, strategy)
+        # Apply date filters
+        if 'start_year' in filters:
+            start_year = filters['start_year']
+            filtered_df = filtered_df[filtered_df['imaging_year'] >= start_year]
+        
+        if 'end_year' in filters:
+            end_year = filters['end_year']
+            filtered_df = filtered_df[filtered_df['imaging_year'] <= end_year]
+        
+        # Apply bladder volume filters
+        if 'min_bladder_volume_ml' in filters:
+            min_volume = filters['min_bladder_volume_ml']
+            filtered_df = filtered_df[filtered_df['bladder_volume_ml'] >= min_volume]
+        
+        if 'max_bladder_volume_ml' in filters:
+            max_volume = filters['max_bladder_volume_ml']
+            filtered_df = filtered_df[filtered_df['bladder_volume_ml'] <= max_volume]
+        
+        # Apply narrative text search filters (new schema)
+        if 'narrative_contains_any' in filters:
+            # Search for ANY of the terms
+            terms = filters['narrative_contains_any']
+            if isinstance(terms, str):
+                terms = [terms]
+            if isinstance(terms, list) and len(terms) > 0:
+                # Filter out empty strings
+                terms = [str(t).strip() for t in terms if t and str(t).strip()]
+                if len(terms) > 0:
+                    # Try to find text column (narrative, history_summary, or any text column)
+                    text_column = None
+                    if 'narrative' in filtered_df.columns:
+                        text_column = 'narrative'
+                    elif 'history_summary' in filtered_df.columns:
+                        text_column = 'history_summary'
+                    else:
+                        # Find any text/object column that might contain narrative
+                        text_columns = filtered_df.select_dtypes(include=['object']).columns.tolist()
+                        # Prefer columns with longer text (likely narratives)
+                        for col in text_columns:
+                            if col not in ['recordid', 'imaging_date', 'matched_reason']:
+                                sample_len = filtered_df[col].astype(str).str.len().mean()
+                                if sample_len > 50:  # Likely a narrative column
+                                    text_column = col
+                                    break
+                        if not text_column and text_columns:
+                            # Fallback to first text column
+                            text_column = text_columns[0]
+                    
+                    if text_column:
+                        # Build regex pattern for ANY match
+                        pattern = '|'.join([re.escape(str(term).lower()) for term in terms])
+                        mask = filtered_df[text_column].astype(str).str.lower().str.contains(pattern, case=False, na=False, regex=True)
+                        filtered_df = filtered_df[mask]
+                        logger.info(f"Applied narrative_contains_any filter on '{text_column}' column with {len(terms)} terms. Matched {len(filtered_df)} rows.")
+                    else:
+                        logger.warning(f"narrative_contains_any filter specified but no suitable text column found. Available columns: {list(filtered_df.columns)}")
+                else:
+                    logger.warning(f"narrative_contains_any filter had no valid terms after cleaning")
+            else:
+                logger.warning(f"narrative_contains_any filter value is not a valid list: {terms}")
+        
+        if 'narrative_contains_all' in filters:
+            # Search for ALL of the terms
+            terms = filters['narrative_contains_all']
+            if isinstance(terms, str):
+                terms = [terms]
+            if isinstance(terms, list) and len(terms) > 0:
+                # Find text column (same logic as narrative_contains_any)
+                text_column = None
+                if 'narrative' in filtered_df.columns:
+                    text_column = 'narrative'
+                elif 'history_summary' in filtered_df.columns:
+                    text_column = 'history_summary'
+                else:
+                    text_columns = filtered_df.select_dtypes(include=['object']).columns.tolist()
+                    for col in text_columns:
+                        if col not in ['recordid', 'imaging_date', 'matched_reason']:
+                            sample_len = filtered_df[col].astype(str).str.len().mean()
+                            if sample_len > 50:
+                                text_column = col
+                                break
+                
+                if text_column:
+                    mask = pd.Series([True] * len(filtered_df), index=filtered_df.index)
+                    for term in terms:
+                        term_mask = filtered_df[text_column].astype(str).str.contains(str(term), case=False, na=False)
+                        mask = mask & term_mask
+                    filtered_df = filtered_df[mask]
+                    logger.info(f"Applied narrative_contains_all filter on '{text_column}' column. Matched {len(filtered_df)} rows.")
+                else:
+                    logger.warning(f"narrative_contains_all filter specified but no suitable text column found")
+        
+        if 'narrative_contains_none' in filters:
+            # Exclude rows containing ANY of the terms
+            terms = filters['narrative_contains_none']
+            if isinstance(terms, str):
+                terms = [terms]
+            if isinstance(terms, list) and len(terms) > 0:
+                # Find text column (same logic as narrative_contains_any)
+                text_column = None
+                if 'narrative' in filtered_df.columns:
+                    text_column = 'narrative'
+                elif 'history_summary' in filtered_df.columns:
+                    text_column = 'history_summary'
+                else:
+                    text_columns = filtered_df.select_dtypes(include=['object']).columns.tolist()
+                    for col in text_columns:
+                        if col not in ['recordid', 'imaging_date', 'matched_reason']:
+                            sample_len = filtered_df[col].astype(str).str.len().mean()
+                            if sample_len > 50:
+                                text_column = col
+                                break
+                
+                if text_column:
+                    # Build regex pattern for ANY match
+                    pattern = '|'.join([re.escape(str(term).lower()) for term in terms])
+                    mask = ~filtered_df[text_column].astype(str).str.lower().str.contains(pattern, case=False, na=False, regex=True)
+                    filtered_df = filtered_df[mask]
+                    logger.info(f"Applied narrative_contains_none filter on '{text_column}' column. Matched {len(filtered_df)} rows.")
+                else:
+                    logger.warning(f"narrative_contains_none filter specified but no suitable text column found")
+        
+        # Backward compatibility: old narrative_contains format
+        if 'narrative_contains' in filters:
+            search_term = str(filters['narrative_contains']).lower()
+            # Find text column (same logic as above)
+            text_column = None
+            if 'narrative' in filtered_df.columns:
+                text_column = 'narrative'
+            elif 'history_summary' in filtered_df.columns:
+                text_column = 'history_summary'
+            else:
+                text_columns = filtered_df.select_dtypes(include=['object']).columns.tolist()
+                for col in text_columns:
+                    if col not in ['recordid', 'imaging_date', 'matched_reason']:
+                        sample_len = filtered_df[col].astype(str).str.len().mean()
+                        if sample_len > 50:
+                            text_column = col
+                            break
+            
+            if text_column:
+                filtered_df = filtered_df[filtered_df[text_column].astype(str).str.contains(search_term, case=False, na=False)]
+                logger.info(f"Applied narrative_contains filter on '{text_column}' column. Matched {len(filtered_df)} rows.")
+            else:
+                logger.warning(f"narrative_contains filter specified but no suitable text column found. Available columns: {list(filtered_df.columns)}")
+        
+        # Apply direct column filters (for categorical columns like right_hydronephrosis, left_hydronephrosis, etc.)
+        # This handles filters where the key matches a column name directly
+        for key, value in filters.items():
+            # Skip special filter keys that we've already handled
+            special_keys = ['side', 'stone_presence', 'min_size_cm', 'max_size_cm', 'start_year', 'end_year',
+                          'min_bladder_volume_ml', 'max_bladder_volume_ml', 'narrative_contains', 
+                          'narrative_contains_any', 'narrative_contains_all', 'narrative_contains_none', 'distinct']
+            
+            if key in special_keys:
+                continue
+            
+            # Check if this is a direct column filter
+            if key in filtered_df.columns:
+                # Handle categorical filters (present/absent/unclear)
+                if value in ['present', 'absent', 'unclear']:
+                    filtered_df = filtered_df[filtered_df[key] == value]
+                    logger.info(f"Applied direct column filter '{key}' == '{value}': {len(filtered_df)} rows remaining")
+                # Handle list of values (e.g., ["present", "unclear"])
+                elif isinstance(value, list):
+                    filtered_df = filtered_df[filtered_df[key].isin(value)]
+                    logger.info(f"Applied direct column filter '{key}' in {value}: {len(filtered_df)} rows remaining")
+                # Handle single value match
+                else:
+                    filtered_df = filtered_df[filtered_df[key] == value]
+                    logger.info(f"Applied direct column filter '{key}' == '{value}': {len(filtered_df)} rows remaining")
+        
+        # Apply distinct clause for patient counting
+        if 'distinct' in filters:
+            distinct_col = filters['distinct']
+            if distinct_col in filtered_df.columns:
+                # Get unique values of distinct column, then filter to first occurrence
+                unique_values = filtered_df[distinct_col].unique()
+                filtered_df = filtered_df.drop_duplicates(subset=[distinct_col], keep='first')
+                logger.info(f"Applied distinct filter on '{distinct_col}': {len(filtered_df)} unique records")
+            else:
+                logger.warning(f"distinct filter specified for non-existent column '{distinct_col}'")
+        
+        # Add matched_reason column
+        filtered_df = self._add_matched_reason(filtered_df, filters)
         
         return filtered_df
     
@@ -455,7 +642,8 @@ class QueryTools:
             min_size = filters['min_size_cm']
             max_size = filters['max_size_cm']
             
-            if min_size > max_size:
+            # Only compare if both values are not None
+            if min_size is not None and max_size is not None and min_size > max_size:
                 validation['is_valid'] = False
                 validation['warnings'].append(
                     f"min_size_cm ({min_size}) is greater than max_size_cm ({max_size}) - this will return no results"
@@ -524,13 +712,13 @@ class QueryTools:
             max_volume = filters['max_bladder_volume_ml']
             filtered_df = filtered_df[filtered_df['bladder_volume_ml'] <= max_volume]
         
-        # Add matched_reason column with adaptive logic
-        filtered_df = self._add_adaptive_matched_reason(filtered_df, filters, strategy)
+        # Add matched_reason column
+        filtered_df = self._add_matched_reason(filtered_df, filters)
         
         return filtered_df
     
-    def _apply_side_filter(self, df: pd.DataFrame, side: str, strategy: Dict[str, Any]) -> pd.DataFrame:
-        """Apply side filter with adaptive logic."""
+    def _apply_side_filter(self, df: pd.DataFrame, side: str) -> pd.DataFrame:
+        """Apply side filter."""
         if not side:
             return df
         side = side.lower()
@@ -544,8 +732,8 @@ class QueryTools:
         else:
             return df
     
-    def _apply_presence_filter(self, df: pd.DataFrame, presence: str, strategy: Dict[str, Any]) -> pd.DataFrame:
-        """Apply stone presence filter with adaptive logic."""
+    def _apply_presence_filter(self, df: pd.DataFrame, presence: str) -> pd.DataFrame:
+        """Apply stone presence filter."""
         if not presence:
             return df
         presence = presence.lower()
@@ -562,131 +750,61 @@ class QueryTools:
         else:
             return df
     
-    def _apply_size_filters(self, df: pd.DataFrame, filters: Dict[str, Any], strategy: Dict[str, Any]) -> pd.DataFrame:
-        """Apply size filters with adaptive logic."""
+    def _apply_size_filters(self, df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+        """Apply size filters. LLM handles intent, so we apply filters directly."""
         filtered_df = df.copy()
+        side = filters.get('side', '').lower() if 'side' in filters else None
         
-        # Determine size filtering approach
-        if strategy['size_logic'] == 'side_aware' and 'side' in filters:
-            # Side-specific size filtering
-            side = (filters.get('side') or '').lower()
-            if not side:
-                # If side is None or empty, skip side-specific filtering
-                pass
-            
-            if 'min_size_cm' in filters:
-                min_size = filters['min_size_cm']
-                if side == 'left':
-                    size_condition = (filtered_df['left_stone_size_cm'] >= min_size)
-                elif side == 'right':
-                    size_condition = (filtered_df['right_stone_size_cm'] >= min_size)
-                else:  # bilateral
-                    size_condition = (
-                        (filtered_df['right_stone_size_cm'] >= min_size) |
-                        (filtered_df['left_stone_size_cm'] >= min_size)
-                    )
-                filtered_df = filtered_df[size_condition]
-            
-            if 'max_size_cm' in filters:
-                max_size = filters['max_size_cm']
-                if side == 'left':
-                    size_condition = (filtered_df['left_stone_size_cm'] <= max_size)
-                elif side == 'right':
-                    size_condition = (filtered_df['right_stone_size_cm'] <= max_size)
-                else:  # bilateral
-                    size_condition = (
-                        (filtered_df['right_stone_size_cm'] <= max_size) |
-                        (filtered_df['left_stone_size_cm'] <= max_size)
-                    )
-                filtered_df = filtered_df[size_condition]
-        
-        elif strategy['size_logic'] == 'range':
-            # Range-based filtering (min AND max)
-            if 'min_size_cm' in filters and 'max_size_cm' in filters:
-                min_size = filters['min_size_cm']
-                max_size = filters['max_size_cm']
-                
-                # Apply range to both sides if no specific side
-                if 'side' not in filters:
-                    size_condition = (
-                        ((filtered_df['right_stone_size_cm'] >= min_size) & 
-                         (filtered_df['right_stone_size_cm'] <= max_size)) |
-                        ((filtered_df['left_stone_size_cm'] >= min_size) & 
-                         (filtered_df['left_stone_size_cm'] <= max_size))
-                    )
-                else:
-                    side = (filters.get('side') or '').lower()
-                    if not side:
-                        # Skip if side is None or empty - apply to both sides instead
-                        size_condition = (
-                            ((filtered_df['right_stone_size_cm'] >= min_size) & 
-                             (filtered_df['right_stone_size_cm'] <= max_size)) |
-                            ((filtered_df['left_stone_size_cm'] >= min_size) & 
-                             (filtered_df['left_stone_size_cm'] <= max_size))
-                        )
-                    elif side == 'left':
-                        size_condition = (
-                            (filtered_df['left_stone_size_cm'] >= min_size) & 
-                            (filtered_df['left_stone_size_cm'] <= max_size))
-                    elif side == 'right':
-                        size_condition = (
-                            (filtered_df['right_stone_size_cm'] >= min_size) & 
-                            (filtered_df['right_stone_size_cm'] <= max_size))
-                    else:  # bilateral
-                        size_condition = (
-                            ((filtered_df['right_stone_size_cm'] >= min_size) & 
-                             (filtered_df['right_stone_size_cm'] <= max_size)) |
-                            ((filtered_df['left_stone_size_cm'] >= min_size) & 
-                             (filtered_df['left_stone_size_cm'] <= max_size)))
-                
-                filtered_df = filtered_df[size_condition]
-        
-        elif strategy['size_logic'] == 'statistical':
-            # Statistical filtering (include all stones for analysis)
-            if 'min_size_cm' in filters:
-                min_size = filters['min_size_cm']
+        # Apply min size filter
+        if 'min_size_cm' in filters:
+            min_size = filters['min_size_cm']
+            if side == 'left':
+                size_condition = (filtered_df['left_stone_size_cm'] >= min_size)
+            elif side == 'right':
+                size_condition = (filtered_df['right_stone_size_cm'] >= min_size)
+            elif side == 'bilateral':
                 size_condition = (
                     (filtered_df['right_stone_size_cm'] >= min_size) |
                     (filtered_df['left_stone_size_cm'] >= min_size)
                 )
-                filtered_df = filtered_df[size_condition]
-            
-            if 'max_size_cm' in filters:
-                max_size = filters['max_size_cm']
-                size_condition = (
-                    (filtered_df['right_stone_size_cm'] <= max_size) |
-                    (filtered_df['left_stone_size_cm'] <= max_size)
-                )
-                filtered_df = filtered_df[size_condition]
-        
-        else:
-            # Standard filtering (fallback)
-            if 'min_size_cm' in filters:
-                min_size = filters['min_size_cm']
+            else:
+                # No side specified - check both sides
                 size_condition = (
                     (filtered_df['right_stone_size_cm'] >= min_size) |
                     (filtered_df['left_stone_size_cm'] >= min_size)
                 )
-                filtered_df = filtered_df[size_condition]
-            
-            if 'max_size_cm' in filters:
-                max_size = filters['max_size_cm']
+            filtered_df = filtered_df[size_condition]
+        
+        # Apply max size filter
+        if 'max_size_cm' in filters:
+            max_size = filters['max_size_cm']
+            if side == 'left':
+                size_condition = (filtered_df['left_stone_size_cm'] <= max_size)
+            elif side == 'right':
+                size_condition = (filtered_df['right_stone_size_cm'] <= max_size)
+            elif side == 'bilateral':
                 size_condition = (
                     (filtered_df['right_stone_size_cm'] <= max_size) |
                     (filtered_df['left_stone_size_cm'] <= max_size)
                 )
-                filtered_df = filtered_df[size_condition]
+            else:
+                # No side specified - check both sides
+                size_condition = (
+                    (filtered_df['right_stone_size_cm'] <= max_size) |
+                    (filtered_df['left_stone_size_cm'] <= max_size)
+                )
+            filtered_df = filtered_df[size_condition]
         
         return filtered_df
     
-    def _add_adaptive_matched_reason(self, df: pd.DataFrame, filters: Dict[str, Any], strategy: Dict[str, Any]) -> pd.DataFrame:
-        """Add matched_reason column with adaptive logic."""
+    def _add_matched_reason(self, df: pd.DataFrame, filters: Dict[str, Any]) -> pd.DataFrame:
+        """Add matched_reason column explaining why rows match the filters."""
         reasons = []
         
         for _, row in df.iterrows():
             reason_parts = []
             
-            # Side reason with adaptive logic
+            # Side reason
             if 'side' in filters:
                 side = filters['side']
                 if side == 'left' and row['has_left_stone']:
@@ -696,44 +814,28 @@ class QueryTools:
                 elif side == 'bilateral' and row['has_bilateral_stones']:
                     reason_parts.append(f"bilateral stones present")
             
-            # Size reason with adaptive logic
-            if strategy['size_logic'] == 'side_aware' and 'side' in filters:
-                side = filters['side']
-                if 'min_size_cm' in filters:
-                    min_size = filters['min_size_cm']
-                    if side == 'left' and pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] >= min_size:
-                        reason_parts.append(f"left stone ≥{min_size}cm")
-                    elif side == 'right' and pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] >= min_size:
-                        reason_parts.append(f"right stone ≥{min_size}cm")
-                    elif side == 'bilateral':
-                        if pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] >= min_size:
-                            reason_parts.append(f"right stone ≥{min_size}cm")
-                        if pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] >= min_size:
-                            reason_parts.append(f"left stone ≥{min_size}cm")
-                
-                if 'max_size_cm' in filters:
-                    max_size = filters['max_size_cm']
-                    if side == 'left' and pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] <= max_size:
-                        reason_parts.append(f"left stone ≤{max_size}cm")
-                    elif side == 'right' and pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] <= max_size:
-                        reason_parts.append(f"right stone ≤{max_size}cm")
-                    elif side == 'bilateral':
-                        if pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] <= max_size:
-                            reason_parts.append(f"right stone ≤{max_size}cm")
-                        if pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] <= max_size:
-                            reason_parts.append(f"left stone ≤{max_size}cm")
+            # Size reasons
+            side = filters.get('side', '').lower() if 'side' in filters else None
             
-            else:
-                # Standard size reasoning
-                if 'min_size_cm' in filters:
-                    min_size = filters['min_size_cm']
+            if 'min_size_cm' in filters:
+                min_size = filters['min_size_cm']
+                if side == 'left' and pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] >= min_size:
+                    reason_parts.append(f"left stone ≥{min_size}cm")
+                elif side == 'right' and pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] >= min_size:
+                    reason_parts.append(f"right stone ≥{min_size}cm")
+                elif side == 'bilateral' or not side:
                     if pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] >= min_size:
                         reason_parts.append(f"right stone ≥{min_size}cm")
                     if pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] >= min_size:
                         reason_parts.append(f"left stone ≥{min_size}cm")
-                
-                if 'max_size_cm' in filters:
-                    max_size = filters['max_size_cm']
+            
+            if 'max_size_cm' in filters:
+                max_size = filters['max_size_cm']
+                if side == 'left' and pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] <= max_size:
+                    reason_parts.append(f"left stone ≤{max_size}cm")
+                elif side == 'right' and pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] <= max_size:
+                    reason_parts.append(f"right stone ≤{max_size}cm")
+                elif side == 'bilateral' or not side:
                     if pd.notna(row['right_stone_size_cm']) and row['right_stone_size_cm'] <= max_size:
                         reason_parts.append(f"right stone ≤{max_size}cm")
                     if pd.notna(row['left_stone_size_cm']) and row['left_stone_size_cm'] <= max_size:
@@ -886,19 +988,18 @@ class QueryTools:
         year_counts = self.df['imaging_year'].value_counts().sort_index()
         return {str(year): count for year, count in year_counts.items() if pd.notna(year)}
     
-    def estimate_matching_rows(self, filters: Dict[str, Any], query_context: Optional[Dict[str, Any]] = None) -> int:
+    def estimate_matching_rows(self, filters: Dict[str, Any]) -> int:
         """
         Estimate number of rows that would match given filters.
         
         Args:
             filters: Dictionary of filters
-            query_context: Optional context about the query for adaptive filtering
             
         Returns:
             Estimated number of matching rows
         """
         try:
-            filtered_df = self.apply_filters(filters, query_context)
+            filtered_df = self.apply_filters(filters)
             return len(filtered_df)
         except Exception as e:
             logger.warning(f"Error estimating matching rows: {e}")
