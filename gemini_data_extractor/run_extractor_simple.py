@@ -21,7 +21,7 @@ extractor = GeminiDataExtractor()
 print("Ready!\n")
 
 # Example query
-query = "Which patients have the left kidney stone? Extract this information from the narrative text column."
+query = "Which patients have left kidney stone? Extract this information from the narrative text column."
 
 print(f"Query: {query}\n")
 print("Processing...\n")
