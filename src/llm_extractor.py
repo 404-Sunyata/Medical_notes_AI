@@ -141,7 +141,7 @@ Return a JSON object with this exact structure:
     )
     def _call_llm_api(self, narrative: str) -> Dict[str, Any]:
         """Call LLM API (OpenAI or Gemini) with retry logic."""
-        if self.provider == "openai":
+        if self.provider in ("openai", "qwen", "dashscope"):
             return self._call_openai_api(narrative)
         elif self.provider == "gemini":
             return self._call_gemini_api(narrative)
@@ -149,9 +149,7 @@ Return a JSON object with this exact structure:
             raise ValueError(f"Unsupported LLM provider: {self.provider}")
     
     def _call_openai_api(self, narrative: str) -> Dict[str, Any]:
-        """Call OpenAI API with retry logic."""
-        from openai import OpenAI
-        
+        """Call OpenAI or Qwen (DashScope OpenAI-compatible) with retry logic."""
         start_time = time.time()
         
         try:
@@ -160,15 +158,19 @@ Return a JSON object with this exact structure:
             if not safety_report["safe"]:
                 logger.warning(f"Potential PHI detected, using redacted text")
                 narrative = safety_report["redacted_text"]
-            
-            # Make API call
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
+
+            create_kwargs: Dict[str, Any] = {
+                "model": self.model_name,
+                "messages": [
                     {"role": "system", "content": self._create_system_prompt()},
                     {"role": "user", "content": self._create_user_prompt(narrative)}
                 ],
-                response_format={"type": "json_schema", "json_schema": {
+                "temperature": 0.1,
+                "timeout": TIMEOUT_SECONDS,
+            }
+            # Qwen / DashScope compatible mode may not support OpenAI json_schema response_format
+            if self.provider == "openai":
+                create_kwargs["response_format"] = {"type": "json_schema", "json_schema": {
                     "name": "radiology_extraction",
                     "schema": {
                         "type": "object",
@@ -206,10 +208,9 @@ Return a JSON object with this exact structure:
                         },
                         "required": ["right", "left", "bladder", "history_summary", "key_sentences"]
                     }
-                }},
-                temperature=0.1,
-                timeout=TIMEOUT_SECONDS
-            )
+                }}
+            
+            response = self.client.chat.completions.create(**create_kwargs)
             
             # Extract response
             content = response.choices[0].message.content
@@ -225,7 +226,8 @@ Return a JSON object with this exact structure:
             cost = self._calculate_cost(tokens_used)
             processing_time = int((time.time() - start_time) * 1000)
             
-            logger.info(f"OpenAI API call successful: {tokens_used['total_tokens']} tokens, ${cost:.4f}, {processing_time}ms")
+            label = "OpenAI" if self.provider == "openai" else "Qwen"
+            logger.info(f"{label} API call successful: {tokens_used['total_tokens']} tokens, ${cost:.4f}, {processing_time}ms")
             
             return {
                 'extraction_json': extraction_json,

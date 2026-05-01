@@ -42,7 +42,7 @@ def _sanitize_query_for_schema_tagging(query_text: str) -> str:
 
 def _call_llm_unified(client, prompt: str, max_tokens: int = 1000, temperature: float = 0.1) -> str:
     """Unified LLM call that works with both OpenAI and Gemini."""
-    if LLM_PROVIDER == "openai":
+    if LLM_PROVIDER in ("openai", "qwen", "dashscope"):
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": prompt}],

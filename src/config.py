@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # LLM Provider Configuration
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()  # "openai" or "gemini"
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()  # "openai", "gemini", or "qwen"
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -21,8 +21,25 @@ OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")  # Default to 2.5, will auto-detect if not available
 
+# Qwen (Alibaba DashScope OpenAI-compatible API)
+QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+QWEN_MODEL_NAME = os.getenv("QWEN_MODEL", "qwen-plus")
+QWEN_BASE_URL = os.getenv(
+    "QWEN_BASE_URL",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+).strip()
+
 # Common Configuration
-MODEL_NAME = os.getenv("MODEL_NAME", OPENAI_MODEL_NAME if LLM_PROVIDER == "openai" else GEMINI_MODEL_NAME)
+def _default_model_name() -> str:
+    if LLM_PROVIDER == "openai":
+        return OPENAI_MODEL_NAME
+    if LLM_PROVIDER == "gemini":
+        return GEMINI_MODEL_NAME
+    if LLM_PROVIDER in ("qwen", "dashscope"):
+        return QWEN_MODEL_NAME
+    return OPENAI_MODEL_NAME
+
+MODEL_NAME = os.getenv("MODEL_NAME", _default_model_name())
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 TIMEOUT_SECONDS = int(os.getenv("TIMEOUT_SECONDS", "30"))
@@ -44,8 +61,11 @@ if LLM_PROVIDER == "openai":
 elif LLM_PROVIDER == "gemini":
     if not GEMINI_API_KEY or GEMINI_API_KEY == "dummy_key_for_testing":
         logger.warning("GEMINI_API_KEY not set or using dummy key - LLM features will be disabled")
+elif LLM_PROVIDER in ("qwen", "dashscope"):
+    if not QWEN_API_KEY or QWEN_API_KEY == "dummy_key_for_testing":
+        logger.warning("QWEN_API_KEY / DASHSCOPE_API_KEY not set or using dummy key - LLM features will be disabled")
 else:
-    logger.warning(f"Unknown LLM provider: {LLM_PROVIDER}. Supported: 'openai', 'gemini'")
+    logger.warning(f"Unknown LLM provider: {LLM_PROVIDER}. Supported: 'openai', 'gemini', 'qwen'")
 
 # Model configuration
 SUPPORTED_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo"]
@@ -71,6 +91,8 @@ def get_llm_client():
         return get_openai_client()
     elif LLM_PROVIDER == "gemini":
         return get_gemini_client()
+    elif LLM_PROVIDER in ("qwen", "dashscope"):
+        return get_qwen_client()
     else:
         logger.error(f"Unsupported LLM provider: {LLM_PROVIDER}")
         return None
@@ -104,7 +126,16 @@ def get_gemini_client():
         logger.error(f"Failed to create Gemini client: {e}")
         return None
 
-# Backward compatibility - alias for get_llm_client
-def get_openai_client():
-    """Backward compatibility alias for get_llm_client."""
-    return get_llm_client()
+def get_qwen_client():
+    """Qwen via DashScope OpenAI-compatible endpoint (same SDK as OpenAI)."""
+    try:
+        from openai import OpenAI
+        if not QWEN_API_KEY or QWEN_API_KEY == "dummy_key_for_testing":
+            return None
+        return OpenAI(api_key=QWEN_API_KEY, base_url=QWEN_BASE_URL)
+    except ImportError:
+        logger.error("OpenAI package not installed. Install with: pip install openai")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to create Qwen (DashScope) client: {e}")
+        return None

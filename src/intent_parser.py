@@ -144,7 +144,7 @@ class IntentParser:
             
             try:
                 # Call LLM to analyze schema
-                if LLM_PROVIDER == "openai":
+                if LLM_PROVIDER in ("openai", "qwen", "dashscope"):
                     response = client.chat.completions.create(
                         model=MODEL_NAME,
                         messages=[{"role": "user", "content": schema_analysis_prompt}],
@@ -408,7 +408,7 @@ class IntentParser:
             prompt = self._generate_prompt_with_llm(query, df)
             
             # Call appropriate API based on provider to parse the query
-            if LLM_PROVIDER == "openai":
+            if LLM_PROVIDER in ("openai", "qwen", "dashscope"):
                 response = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=[{"role": "user", "content": prompt}],
